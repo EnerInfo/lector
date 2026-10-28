@@ -15,6 +15,7 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
+import android.util.Log
 import app.lector.core.Document
 import app.lector.core.ReadingCadence
 import java.util.Locale
@@ -45,7 +46,7 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 class SystemTtsEngine(
     context: Context,
-    private val cadence: ReadingCadence = ReadingCadence(),
+    cadence: ReadingCadence? = null,
 ) : SpeechEngine {
 
     private val appContext = context.applicationContext
@@ -53,6 +54,24 @@ class SystemTtsEngine(
 
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences("lector_prefs", Context.MODE_PRIVATE)
+
+    private val cadence: ReadingCadence = cadence ?: ReadingCadence(
+        getInterSentencePauseMs = { loadSentencePauseMs() },
+        getParagraphPauseMs = { loadParagraphPauseMs() },
+    )
+
+    private fun loadSentencePauseMs(): Long =
+        runCatching { prefs.getLong(KEY_SENTENCE_PAUSE_MS, DEFAULT_SENTENCE_PAUSE_MS) }
+            .getOrDefault(DEFAULT_SENTENCE_PAUSE_MS)
+            .coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
+
+    private fun loadParagraphPauseMs(): Long {
+        val sentencePauseMs = loadSentencePauseMs()
+        val paragraphMinimum = (sentencePauseMs * 1.5).toLong()
+        return runCatching { prefs.getLong(KEY_PARAGRAPH_PAUSE_MS, DEFAULT_PARAGRAPH_PAUSE_MS) }
+            .getOrDefault(DEFAULT_PARAGRAPH_PAUSE_MS)
+            .coerceIn(paragraphMinimum, MAX_PARAGRAPH_PAUSE_MS)
+    }
 
     private val _status = MutableStateFlow(EngineStatus.INITIALIZING)
     private val _speaking = MutableStateFlow(false)
@@ -206,8 +225,17 @@ class SystemTtsEngine(
         val sentence = doc.sentences[i]
         tts.speak(sentence.text, TextToSpeech.QUEUE_ADD, Bundle(), "s:$gen:$i")
         if (i != lastQueuedIndex) {
+            val interSentencePauseMs = loadSentencePauseMs()
+            val paragraphPauseMs = loadParagraphPauseMs()
+            val base = if (sentence.endsParagraph) paragraphPauseMs else interSentencePauseMs
+            val pauseMs = cadence.pauseAfter(
+                sentence,
+                playRate,
+                interSentencePauseMs,
+                paragraphPauseMs,
+            )
             tts.playSilentUtterance(
-                cadence.pauseAfter(sentence, playRate),
+                pauseMs,
                 TextToSpeech.QUEUE_ADD,
                 "p:$gen:$i",
             )
@@ -243,6 +271,8 @@ class SystemTtsEngine(
     /** Read installed, offline voices and expose them sorted by language. */
     private fun loadVoices() {
         val voices: Set<Voice> = runCatching { tts.voices }.getOrNull() ?: emptySet()
+        voices.sortedWith(compareBy({ it.locale.toLanguageTag() }, { it.name })).forEach { voice ->
+        }
         // Build a base label (language + quality) per voice, then disambiguate
         // any collisions with a trailing counter — clearer than raw engine names.
         //
@@ -388,6 +418,13 @@ class SystemTtsEngine(
 
     private companion object {
         const val KEY_VOICE = "lector.selectedVoiceId"
+        const val KEY_SENTENCE_PAUSE_MS = "reader_sentence_pause_ms"
+        const val KEY_PARAGRAPH_PAUSE_MS = "reader_paragraph_pause_ms"
+        const val DEFAULT_SENTENCE_PAUSE_MS = 180L
+        const val DEFAULT_PARAGRAPH_PAUSE_MS = 550L
+        const val MIN_SENTENCE_PAUSE_MS = 0L
+        const val MAX_SENTENCE_PAUSE_MS = 600L
+        const val MAX_PARAGRAPH_PAUSE_MS = 950L
 
         // Sentences queued ahead of the one playing. Small enough that seek/play
         // stay instant on huge books; large enough to hide refill latency.

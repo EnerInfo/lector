@@ -40,7 +40,7 @@ android {
     defaultConfig {
         // L-GATE-2 (2026-07-05): F-Droid-safe id derived from quantember.github.io
         // (Brian's domain). Code namespace stays app.lector. Permanent once published.
-        applicationId = "io.github.quantember.lector"
+        applicationId = "app.lector.plus"
         minSdk = 26
         targetSdk = 35
         versionCode = 12

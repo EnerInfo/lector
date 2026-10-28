@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Lector"
+rootProject.name = "Lector+"
 include(":app")
 include(":core")

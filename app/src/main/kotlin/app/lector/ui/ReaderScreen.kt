@@ -5,9 +5,18 @@ import android.net.Uri
 import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.foundation.focusable
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,7 +40,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -49,18 +57,30 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalConfiguration
 import app.lector.ReaderUiState
 import app.lector.ReaderViewModel
 import app.lector.Screen
@@ -70,7 +90,11 @@ import app.lector.speech.EngineStatus
 import app.lector.speech.VoiceOption
 import kotlinx.coroutines.yield
 
-private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+private const val MIN_SPEECH_RATE = 0.50f
+private const val MAX_SPEECH_RATE = 4.00f
+private const val SPEECH_RATE_STEP = 0.05f
+private const val DEFAULT_SENTENCE_PAUSE_MS = 180L
+private const val DEFAULT_PARAGRAPH_PAUSE_MS = 550L
 private val SLEEP_OPTIONS = listOf(0, 5, 15, 30, 60)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,6 +103,13 @@ fun ReaderScreen(viewModel: ReaderViewModel) {
     val state by viewModel.uiState.collectAsState()
     var showVoices by remember { mutableStateOf(false) }
     var showSleep by remember { mutableStateOf(false) }
+
+    val readerFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(state.screen) {
+        if (state.screen == Screen.READER) {
+            readerFocusRequester.requestFocus()
+        }
+    }
 
     // Reader page state, lifted so the reading pane and the bottom controls agree.
     var pages by remember(state.document) { mutableStateOf<List<IntRange>>(emptyList()) }
@@ -92,14 +123,37 @@ fun ReaderScreen(viewModel: ReaderViewModel) {
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             // Reader has no top bar — its controls live at the bottom (title/Sleep/
             // Voice/Home moved there). Home/Library keep a conventional top bar.
             if (state.screen != Screen.READER) {
                 TopAppBar(
-                    title = { Text("Lector", maxLines = 1) },
+                    title = {
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "Lector+",
+                                modifier = Modifier.align(Alignment.CenterStart),
+                                maxLines = 1,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            if (state.screen == Screen.HOME) {
+                                Text(
+                                    "What shall I read to you?",
+                                    modifier = Modifier.align(Alignment.Center),
+                                    maxLines = 1,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    },
                     actions = {
-                        if (state.voices.isNotEmpty()) TextButton(onClick = { showVoices = true }) { Text("Voice") }
+                        // Voice selection is available in the Home action row.
                         if (state.screen != Screen.HOME) TextButton(onClick = viewModel::showHome) { Text("Home") }
                     },
                 )
@@ -130,13 +184,19 @@ fun ReaderScreen(viewModel: ReaderViewModel) {
                     pages = pages,
                     onPages = { pages = it },
                     onSentenceTap = viewModel::seekTo,
-                    modifier = modifier,
+                    modifier = modifier
+                        .focusRequester(readerFocusRequester)
+                        .focusable(),
                 )
             }
             Screen.LIBRARY -> LibraryScreen(state, { viewModel.openUri(Uri.parse(it.uri)) }, { openFolder.launch(null) }, modifier)
             Screen.HOME -> HomeScreen(
                 state = state,
-                onListen = viewModel::setPastedText,
+                onListen = { text, selectionStart, selectionEnd ->
+                    viewModel.setPastedText(text, selectionStart, selectionEnd)
+                },
+                onOpenVoices = { showVoices = true },
+                onEditorChange = viewModel::updateEditorState,
                 onOpenFile = { openFile.launch(arrayOf("*/*")) },
                 onOpenFolder = { openFolder.launch(null) },
                 onOpenLibrary = viewModel::showLibrary,
@@ -287,6 +347,8 @@ private fun ReaderControls(
     onSleep: () -> Unit,
     onVoice: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val adjustments = remember(context) { loadReaderAdjustments(context) }
     val lastIndex = state.document?.sentences?.lastIndex ?: 0
     val displaySentence = (scrub?.toInt() ?: state.currentSentence).coerceIn(0, maxOf(0, lastIndex))
     val pageIndex = pages.indexOfLast { it.first <= displaySentence }.coerceAtLeast(0)
@@ -295,31 +357,130 @@ private fun ReaderControls(
         Column(
             Modifier
                 .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 0.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            // Moved-from-top navigation: title + Sleep + Voice + Home.
-            Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(4.dp), Alignment.CenterVertically) {
+            // Title left, adjustments centered, navigation right.
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
-                    state.title ?: "Lector",
-                    style = MaterialTheme.typography.titleSmall,
+                    "Lector+",
+                    style = MaterialTheme.typography.labelLarge,
                     maxLines = 1,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = onSleep) {
+
+                Row(
+                    modifier = Modifier.weight(3f),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                var storedSpeed by remember { mutableStateOf(adjustments.speed) }
+                var sentencePauseMs by remember { mutableStateOf(adjustments.sentencePauseMs) }
+                var paragraphPauseMs by remember { mutableStateOf(adjustments.paragraphPauseMs) }
+
+                val prefs = remember(context) {
+                    context.getSharedPreferences(READER_PREFS, android.content.Context.MODE_PRIVATE)
+                }
+                val saveSpeed = {
+                    prefs.edit().putFloat(KEY_READER_SPEED, storedSpeed).apply()
+                }
+                val applyStoredSpeed = {
+                    try {
+                        val speed = prefs.getFloat(KEY_READER_SPEED, DEFAULT_READER_SPEED)
+                        viewModel.setSpeed(speed)
+                    } catch (e: Exception) {
+                        throw e
+                    }
+                    Unit
+                }
+                val saveSentenceAndParagraphPauses = {
+                    prefs.edit()
+                        .putLong(KEY_SENTENCE_PAUSE_MS, sentencePauseMs)
+                        .putLong(KEY_PARAGRAPH_PAUSE_MS, paragraphPauseMs)
+                        .apply()
+                }
+                val saveParagraphPause = {
+                    prefs.edit().putLong(KEY_PARAGRAPH_PAUSE_MS, paragraphPauseMs).apply()
+                }
+                val paragraphMinimum = (sentencePauseMs * 1.5).toLong()
+
+                AdjustmentControl(
+                    label = "Speed",
+                    value = formatSpeed(storedSpeed),
+                    onDecreaseDown = {
+                        storedSpeed = (storedSpeed - SPEECH_RATE_STEP)
+                            .coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE)
+                        saveSpeed()
+                    },
+                    onDecreaseUp = applyStoredSpeed,
+                    onIncreaseDown = {
+                        storedSpeed = (storedSpeed + SPEECH_RATE_STEP)
+                            .coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE)
+                        saveSpeed()
+                    },
+                    onIncreaseUp = applyStoredSpeed,
+                )
+                AdjustmentControl(
+                    label = "Sentence pause",
+                    value = "$sentencePauseMs ms",
+                    onDecreaseDown = {
+                        sentencePauseMs = (sentencePauseMs - 10L)
+                            .coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
+                        paragraphPauseMs = paragraphPauseMs.coerceAtLeast((sentencePauseMs * 1.5).toLong())
+                        saveSentenceAndParagraphPauses()
+                    },
+                    onDecreaseUp = applyStoredSpeed,
+                    onIncreaseDown = {
+                        sentencePauseMs = (sentencePauseMs + 10L)
+                            .coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
+                        paragraphPauseMs = paragraphPauseMs.coerceAtLeast((sentencePauseMs * 1.5).toLong())
+                        saveSentenceAndParagraphPauses()
+                    },
+                    onIncreaseUp = applyStoredSpeed,
+                )
+                AdjustmentControl(
+                    label = "Paragraph pause",
+                    value = "$paragraphPauseMs ms",
+                    onDecreaseDown = {
+                        paragraphPauseMs = (paragraphPauseMs - 10L)
+                            .coerceIn(paragraphMinimum, MAX_PARAGRAPH_PAUSE_MS)
+                        saveParagraphPause()
+                    },
+                    onDecreaseUp = applyStoredSpeed,
+                    onIncreaseDown = {
+                        paragraphPauseMs = (paragraphPauseMs + 10L)
+                            .coerceIn(paragraphMinimum, MAX_PARAGRAPH_PAUSE_MS)
+                        saveParagraphPause()
+                    },
+                    onIncreaseUp = applyStoredSpeed,
+                )
+
+                }
+
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                TextButton(
+                    onClick = onSleep,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                ) {
                     Text(if (state.sleepMinutes > 0) "Sleep ${state.sleepMinutes}m" else "Sleep")
                 }
-                if (state.voices.isNotEmpty()) TextButton(onClick = onVoice) { Text("Voice") }
-                TextButton(onClick = viewModel::showHome) { Text("Home") }
-            }
-
-            // Speed options.
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SPEEDS.forEach { speed ->
-                    FilterChip(
-                        selected = state.speed == speed,
-                        onClick = { viewModel.setSpeed(speed) },
-                        label = { Text(formatSpeed(speed)) },
-                    )
+                if (state.voices.isNotEmpty()) {
+                    TextButton(
+                        onClick = onVoice,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    ) { Text("Voice") }
+                }
+                TextButton(
+                    onClick = viewModel::showHome,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                ) { Text("Home") }
                 }
             }
 
@@ -331,20 +492,35 @@ private fun ReaderControls(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Slider(
-                value = (scrub ?: state.currentSentence.toFloat()).coerceIn(0f, maxOf(1f, lastIndex.toFloat())),
-                onValueChange = onScrub,
-                onValueChangeFinished = onScrubCommit,
-                valueRange = 0f..maxOf(1f, lastIndex.toFloat()),
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Slider(
+                    value = (scrub ?: state.currentSentence.toFloat()).coerceIn(0f, maxOf(1f, lastIndex.toFloat())),
+                    onValueChange = onScrub,
+                    onValueChangeFinished = onScrubCommit,
+                    valueRange = 0f..maxOf(1f, lastIndex.toFloat()),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
             // Transport: Back/Next flip pages; Play/Pause toggles playback.
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 OutlinedButton(
                     onClick = { pages.getOrNull(pageIndex - 1)?.let { viewModel.seekTo(it.first) } },
                     enabled = pageIndex > 0,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.heightIn(min = 30.dp),
                 ) { Text("◀ Back") }
-                Button(onClick = viewModel::playPause, enabled = state.engineReady) {
+                Button(
+                    onClick = viewModel::playPause,
+                    enabled = state.engineReady,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.heightIn(min = 30.dp),
+                ) {
                     Text(
                         when (state.engineStatus) {
                             EngineStatus.INITIALIZING -> "Preparing…"
@@ -356,6 +532,8 @@ private fun ReaderControls(
                 OutlinedButton(
                     onClick = { pages.getOrNull(pageIndex + 1)?.let { viewModel.seekTo(it.first) } },
                     enabled = pageIndex < pages.lastIndex,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.heightIn(min = 30.dp),
                 ) { Text("Next ▶") }
             }
         }
@@ -367,61 +545,156 @@ private fun ReaderControls(
 @Composable
 private fun HomeScreen(
     state: ReaderUiState,
-    onListen: (String) -> Unit,
+    onListen: (String, Int, Int) -> Unit,
+    onOpenVoices: () -> Unit,
+    onEditorChange: (String, Int, Int) -> Unit,
     onOpenFile: () -> Unit,
     onOpenFolder: () -> Unit,
     onOpenLibrary: () -> Unit,
     onOpenRecent: (LibraryEntry) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var input by rememberSaveable { mutableStateOf("") }
+    var input by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = state.editorText,
+                selection = TextRange(
+                    state.editorSelectionStart.coerceIn(0, state.editorText.length),
+                    state.editorSelectionEnd.coerceIn(0, state.editorText.length),
+                ),
+            ),
+        )
+    }
     val clipboard = LocalClipboardManager.current
+    val textFieldFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        textFieldFocusRequester.requestFocus()
+    }
+    fun updateInput(value: TextFieldValue) {
+        input = value
+        onEditorChange(value.text, value.selection.start, value.selection.end)
+    }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize().padding(horizontal = 24.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 16.dp),
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp),
     ) {
-        if (state.engineStatus == EngineStatus.FAILED) {
-            item { NoEngineNotice(); Spacer(Modifier.height(16.dp)) }
-        }
-        item {
-            Text("What shall I read to you?", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = onOpenFile) { Text("Open file") }
-                OutlinedButton(onClick = onOpenFolder) { Text("Open folder") }
-                if (state.library.isNotEmpty()) OutlinedButton(onClick = onOpenLibrary) { Text("Library") }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Open a TXT, Markdown, EPUB, PDF, or other text file — a single file or a " +
-                    "whole folder (scanned into your library). Or paste text below.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
-        }
-        if (state.recents.isNotEmpty()) {
-            item { Text("Recent", style = MaterialTheme.typography.titleMedium); Spacer(Modifier.height(4.dp)) }
-            items(state.recents, key = { "recent:" + it.uri }) { entry ->
-                EntryRow(entry) { onOpenRecent(entry) }
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-            }
-            item { Spacer(Modifier.height(16.dp)) }
-        }
-        item {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        ) {
             OutlinedTextField(
                 value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.fillMaxWidth().height(140.dp),
+                onValueChange = ::updateInput,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .focusRequester(textFieldFocusRequester)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) {
+                            false
+                        } else if (
+                            event.key != Key.DirectionUp &&
+                            event.key != Key.DirectionDown
+                        ) {
+                            false
+                        } else {
+                            val text = input.text
+                            val caret = input.selection.start.coerceIn(0, text.length)
+                            val lineStart = text.lastIndexOf('\n', (caret - 1).coerceAtLeast(0))
+                                .let { if (caret == 0) 0 else it + 1 }
+                            val lineEndFound = text.indexOf('\n', caret)
+                            val lineEnd = if (lineEndFound < 0) text.length else lineEndFound
+                            val column = caret - lineStart
+
+                            if (event.key == Key.DirectionUp) {
+                                if (lineStart == 0) {
+                                    true
+                                } else {
+                                    val previousEnd = lineStart - 1
+                                    val previousStart = text.lastIndexOf(
+                                        '\n',
+                                        (previousEnd - 1).coerceAtLeast(0),
+                                    ).let { if (previousEnd == 0) 0 else it + 1 }
+                                    val target = (previousStart + column).coerceAtMost(previousEnd)
+                                    updateInput(input.copy(selection = TextRange(target)))
+                                    true
+                                }
+                            } else {
+                                if (lineEnd == text.length) {
+                                    true
+                                } else {
+                                    val nextStart = lineEnd + 1
+                                    val nextEndFound = text.indexOf('\n', nextStart)
+                                    val nextEnd = if (nextEndFound < 0) text.length else nextEndFound
+                                    val target = (nextStart + column).coerceAtMost(nextEnd)
+                                    updateInput(input.copy(selection = TextRange(target)))
+                                    true
+                                }
+                            }
+                        }
+                    },
                 placeholder = { Text("Paste or type here…") },
+                textStyle = MaterialTheme.typography.bodyLarge,
+                maxLines = 25,
+                singleLine = false,
             )
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = { clipboard.getText()?.text?.let { input = it } }) { Text("Paste") }
-                Button(onClick = { onListen(input) }, enabled = input.isNotBlank()) { Text("Listen") }
-            }
         }
+
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                clipboard.getText()?.text?.let { text ->
+                                    updateInput(
+                                        TextFieldValue(
+                                            text = text,
+                                            selection = TextRange(0),
+                                        )
+                                    )
+                                    textFieldFocusRequester.requestFocus()
+                                }
+                            }
+                        ) {
+                            Text("Paste")
+                        }
+                        Button(
+                            onClick = { onListen(input.text, input.selection.start, input.selection.end) },
+                            enabled = input.text.isNotBlank()
+                        ) {
+                            Text("Listen")
+                        }
+                    }
+
+                    if (state.voices.isNotEmpty()) {
+                        OutlinedButton(onClick = onOpenVoices) {
+                            Text("Voice")
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = onOpenFile) {
+                            Text("Open file")
+                        }
+                        OutlinedButton(onClick = onOpenFolder) {
+                            Text("Open folder")
+                        }
+                        if (state.library.isNotEmpty()) {
+                            OutlinedButton(onClick = onOpenLibrary) {
+                                Text("Library")
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -563,5 +836,124 @@ private fun highlighted(sentence: Sentence, state: ReaderUiState, isCurrent: Boo
     }
 }
 
+@Composable
+private fun AdjustmentControl(
+    label: String,
+    value: String,
+    onDecreaseDown: () -> Unit,
+    onDecreaseUp: () -> Unit,
+    onIncreaseDown: () -> Unit,
+    onIncreaseUp: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        PressReleaseAdjustmentButton(
+            text = "−",
+            onDown = onDecreaseDown,
+            onUp = onDecreaseUp,
+        )
+        Surface(
+            shape = RoundedCornerShape(6.dp),
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        ) {
+            Text(
+                value,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
+        }
+        PressReleaseAdjustmentButton(
+            text = "+",
+            onDown = onIncreaseDown,
+            onUp = onIncreaseUp,
+        )
+    }
+}
+
+@Composable
+private fun PressReleaseAdjustmentButton(
+    text: String,
+    onDown: () -> Unit,
+    onUp: () -> Unit,
+) {
+    var pressed by remember { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (pressed) MaterialTheme.colorScheme.secondaryContainer
+                else MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.outline
+        ),
+        modifier = Modifier
+            .heightIn(min = 30.dp)
+            .pointerInput(onDown, onUp) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    pressed = true
+                    try {
+                        onDown()
+                    } catch (e: Exception) {
+                        throw e
+                    }
+
+                    var releaseResult = "not returned"
+                    try {
+                        releaseResult = if (waitForUpOrCancellation() != null) "released" else "cancelled"
+                    } catch (e: Exception) {
+                        throw e
+                    } finally {
+                        pressed = false
+                        try {
+                            onUp()
+                        } catch (e: Exception) {
+                            throw e
+                        }
+                    }
+                }
+            },
+    ) {
+        Box(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private const val READER_PREFS = "lector_prefs"
+private const val KEY_READER_SPEED = "reader_speed"
+private const val KEY_SENTENCE_PAUSE_MS = "reader_sentence_pause_ms"
+private const val KEY_PARAGRAPH_PAUSE_MS = "reader_paragraph_pause_ms"
+private const val DEFAULT_READER_SPEED = 1.0f
+private const val MIN_SENTENCE_PAUSE_MS = 0L
+private const val MAX_SENTENCE_PAUSE_MS = 600L
+private const val MAX_PARAGRAPH_PAUSE_MS = 950L
+
+private data class ReaderAdjustments(
+    val speed: Float,
+    val sentencePauseMs: Long,
+    val paragraphPauseMs: Long,
+)
+
+private fun loadReaderAdjustments(context: android.content.Context): ReaderAdjustments {
+    val prefs = context.getSharedPreferences(READER_PREFS, android.content.Context.MODE_PRIVATE)
+    val speed = runCatching { prefs.getFloat(KEY_READER_SPEED, DEFAULT_READER_SPEED) }.getOrDefault(DEFAULT_READER_SPEED).takeIf { it.isFinite() && it in MIN_SPEECH_RATE..MAX_SPEECH_RATE } ?: DEFAULT_READER_SPEED
+    val sentencePauseMs = runCatching { prefs.getLong(KEY_SENTENCE_PAUSE_MS, DEFAULT_SENTENCE_PAUSE_MS) }.getOrDefault(DEFAULT_SENTENCE_PAUSE_MS).coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
+    val paragraphMinimum = (sentencePauseMs * 1.5).toLong()
+    val storedParagraph = runCatching { prefs.getLong(KEY_PARAGRAPH_PAUSE_MS, DEFAULT_PARAGRAPH_PAUSE_MS) }.getOrDefault(DEFAULT_PARAGRAPH_PAUSE_MS)
+    val paragraphPauseMs = storedParagraph.coerceIn(paragraphMinimum, MAX_PARAGRAPH_PAUSE_MS)
+    prefs.edit().putFloat(KEY_READER_SPEED, speed).putLong(KEY_SENTENCE_PAUSE_MS, sentencePauseMs).putLong(KEY_PARAGRAPH_PAUSE_MS, paragraphPauseMs).apply()
+    return ReaderAdjustments(speed, sentencePauseMs, paragraphPauseMs)
+}
+
 private fun formatSpeed(speed: Float): String =
-    if (speed == speed.toInt().toFloat()) "${speed.toInt()}×" else "${speed}×"
+    String.format(java.util.Locale.ROOT, "%.2f×", speed)

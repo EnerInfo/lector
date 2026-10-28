@@ -29,6 +29,9 @@ enum class Screen { HOME, LIBRARY, READER }
 data class ReaderUiState(
     val screen: Screen = Screen.HOME,
     val document: Document? = null,
+    val editorText: String = "",
+    val editorSelectionStart: Int = 0,
+    val editorSelectionEnd: Int = 0,
     val title: String? = null,
     val engineStatus: EngineStatus = EngineStatus.INITIALIZING,
     val isPlaying: Boolean = false,
@@ -113,11 +116,17 @@ class ReaderViewModel(
 
     // ── Text / documents ──────────────────────────────────────────────────────
 
-    private fun setText(text: String, title: String? = null, startSentence: Int = 0) {
+    private fun setText(
+        text: String,
+        title: String? = null,
+        startSentence: Int = 0,
+        cursorOffset: Int? = null,
+    ) {
         engine.stop()
         viewModelScope.launch {
             val doc = withContext(Dispatchers.Default) { segmenter.segment(text) }
-            val start = if (doc.isEmpty) 0 else startSentence.coerceIn(0, doc.sentences.lastIndex)
+            val requestedStart = cursorOffset?.let { sentenceBeforeCursor(doc, it) } ?: startSentence
+            val start = if (doc.isEmpty) 0 else requestedStart.coerceIn(0, doc.sentences.lastIndex)
             lastSavedSentence = start
             savedState[KEY_SENTENCE] = start
             _uiState.update {
@@ -132,10 +141,38 @@ class ReaderViewModel(
         }
     }
 
+    /** Keep the Home editor state even while the Reader screen is visible. */
+    fun updateEditorState(text: String, selectionStart: Int, selectionEnd: Int) {
+        val start = selectionStart.coerceIn(0, text.length)
+        val end = selectionEnd.coerceIn(0, text.length)
+        _uiState.update {
+            it.copy(editorText = text, editorSelectionStart = start, editorSelectionEnd = end)
+        }
+    }
+
     /** Pasted/shared text has no backing file, so it isn't a library entry. */
-    fun setPastedText(text: String) {
+    fun setPastedText(
+        text: String,
+        selectionStart: Int = 0,
+        selectionEnd: Int = selectionStart,
+    ) {
         currentUri = null
-        setText(text, title = null, startSentence = 0)
+        updateEditorState(text, selectionStart, selectionEnd)
+        setText(text, title = null, cursorOffset = selectionEnd)
+    }
+
+    /** Find the sentence containing the caret. */
+    private fun sentenceBeforeCursor(doc: Document, cursorOffset: Int): Int {
+        if (doc.isEmpty) return 0
+        val offset = cursorOffset.coerceIn(0, doc.rawText.length)
+        val containing = doc.sentences.indexOfFirst { offset >= it.start && offset <= it.end }
+        val anchor = if (containing >= 0) {
+            containing
+        } else {
+            val following = doc.sentences.indexOfFirst { it.start >= offset }
+            if (following >= 0) following else doc.sentences.lastIndex
+        }
+        return anchor
     }
 
     /** Open a document from the file picker or library; resumes its saved position. */
@@ -176,7 +213,28 @@ class ReaderViewModel(
     }
 
     fun showLibrary() { engine.stop(); _uiState.update { it.copy(screen = Screen.LIBRARY, document = null) } }
-    fun showHome() { engine.stop(); _uiState.update { it.copy(screen = Screen.HOME, document = null) } }
+    fun showHome() {
+        val current = _uiState.value
+        val sentenceStart = current.document
+            ?.sentences
+            ?.getOrNull(current.currentSentence)
+            ?.start
+            ?.coerceIn(0, current.editorText.length)
+
+        engine.stop()
+        _uiState.update {
+            if (sentenceStart != null) {
+                it.copy(
+                    screen = Screen.HOME,
+                    document = null,
+                    editorSelectionStart = sentenceStart,
+                    editorSelectionEnd = sentenceStart,
+                )
+            } else {
+                it.copy(screen = Screen.HOME, document = null)
+            }
+        }
+    }
     fun dismissImportError() = _uiState.update { it.copy(importError = null) }
 
     // ── Playback ──────────────────────────────────────────────────────────────

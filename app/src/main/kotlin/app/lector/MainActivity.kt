@@ -1,19 +1,55 @@
 package app.lector
 
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import app.lector.ui.LectorTheme
 import app.lector.ui.ReaderScreen
+import androidx.core.view.WindowCompat
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: ReaderViewModel by viewModels()
 
+    private var consumeReaderSpaceUntilUp = false
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_SPACE) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount != 0) {
+                    return consumeReaderSpaceUntilUp
+                }
+
+                if (viewModel.uiState.value.screen == Screen.READER) {
+                    consumeReaderSpaceUntilUp = true
+                    return true
+                }
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                if (consumeReaderSpaceUntilUp) {
+                    consumeReaderSpaceUntilUp = false
+                    viewModel.playPause()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        WindowCompat.getInsetsController(window, window.decorView)
+            .isAppearanceLightNavigationBars = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+
         // Only ingest the launch intent on a FRESH start. On a configuration
         // change (rotation) the ViewModel — and its reading position — survive,
         // so re-processing getIntent() here would wrongly reset to sentence 0.
@@ -30,7 +66,7 @@ class MainActivity : ComponentActivity() {
     // launchMode=singleTask: shares arrive here while the app is already open.
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent) // keep getIntent() current, per the Activity contract
+        setIntent(intent)
         handleIncomingText(intent)
     }
 

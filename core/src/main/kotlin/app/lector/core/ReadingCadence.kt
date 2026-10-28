@@ -18,9 +18,23 @@ package app.lector.core
 data class ReadingCadence(
     val interSentencePauseMs: Long = 180L,
     val paragraphPauseMs: Long = 550L,
+    private val getInterSentencePauseMs: (() -> Long)? = null,
+    private val getParagraphPauseMs: (() -> Long)? = null,
 ) {
     /** Pause after [sentence], scaled for the current speech [rate] (1.0 = normal). */
     fun pauseAfter(sentence: Sentence, rate: Float): Long {
+        val interSentencePauseMs = getInterSentencePauseMs?.invoke() ?: this.interSentencePauseMs
+        val paragraphPauseMs = getParagraphPauseMs?.invoke() ?: this.paragraphPauseMs
+        return pauseAfter(sentence, rate, interSentencePauseMs, paragraphPauseMs)
+    }
+
+    /** Uses caller-supplied pause values while preserving the existing rate scaling. */
+    fun pauseAfter(
+        sentence: Sentence,
+        rate: Float,
+        interSentencePauseMs: Long,
+        paragraphPauseMs: Long,
+    ): Long {
         val base = if (sentence.endsParagraph) paragraphPauseMs else interSentencePauseMs
         return scaleWithRate(base, rate)
     }
